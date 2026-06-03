@@ -2,9 +2,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "raylib.h"
 #include "raymath.h"
+#include "rlgl.h"
 
 #include "math3d.h"
 #include "udp_receiver.h"
@@ -20,12 +22,32 @@
 #define UPPER_ARM_LEN 0.34f
 #define FOREARM_LEN 0.28f
 #define HAND_LEN 0.16f
+#define HAND_BOARD_WIDTH (HAND_LEN * 0.60f)
+#define HAND_BOARD_THICKNESS (HAND_LEN * 0.15f)
+#define HAND_BOARD_LENGTH HAND_LEN
+#define CAMERA_MIN_DISTANCE 0.65f
+#define CAMERA_MAX_DISTANCE 6.00f
+#define CAMERA_MIN_PITCH_DEG -80.0f
+#define CAMERA_MAX_PITCH_DEG 80.0f
+#define CAMERA_ORBIT_SENSITIVITY 0.0055f
+#define CAMERA_ZOOM_STEP 0.16f
 
 typedef struct PitchSample {
     uint64_t timestamp_ms;
     float pitch_deg;
     float pitch_dps;
 } PitchSample;
+
+typedef struct OrbitCameraState {
+    Vector3 target;
+    float distance;
+    float yaw;
+    float pitch;
+    Vector3 default_target;
+    float default_distance;
+    float default_yaw;
+    float default_pitch;
+} OrbitCameraState;
 
 typedef struct AppState {
     UmonUdpReceiver *udp_receiver;
@@ -47,6 +69,15 @@ static void DrawArmSkeleton(const AppState *state);
 static void DrawStatusText(const AppState *state);
 static void DrawOscilloscope(const AppState *state, Rectangle bounds);
 static int CollectRecentSamples(const AppState *state, PitchSample *out_samples, int capacity);
+static OrbitCameraState CreateOrbitCameraState(Vector3 position, Vector3 target);
+static void ResetOrbitCamera(OrbitCameraState *state);
+static void ApplyOrbitCamera(Camera3D *camera, const OrbitCameraState *state);
+static void UpdateOrbitCamera(
+    OrbitCameraState *state,
+    Camera3D *camera,
+    bool mouse_over_viewport,
+    bool reset_requested
+);
 
 static bool IsValidUdpFrame(const UmonUdpFrame *frame) {
     return memcmp(frame->magic, UMON_UDP_MAGIC, 4) == 0 && frame->version == UMON_UDP_VERSION;
@@ -100,11 +131,13 @@ static void DrawArmSkeleton(const AppState *state) {
     Vector3 shoulder_joint = {0.0f, 0.0f, 0.0f};
     Vector3 upper_arm = {0.0f, -UPPER_ARM_LEN, 0.0f};
     Vector3 forearm = {0.0f, -FOREARM_LEN, 0.0f};
-    Vector3 hand_palm = {0.0f, -HAND_LEN, 0.0f};
+    Vector3 hand_palm_axis = {0.0f, -HAND_BOARD_LENGTH, 0.0f};
 
     Vector3 elbow_joint = Vector3Add(shoulder_joint, UmonRotateVector(upper_arm, upper_arm_q));
     Vector3 wrist_joint = Vector3Add(elbow_joint, UmonRotateVector(forearm, forearm_q));
-    Vector3 hand_end = Vector3Add(wrist_joint, UmonRotateVector(hand_palm, hand_palm_q));
+    Vector3 hand_axis_world = UmonRotateVector(hand_palm_axis, hand_palm_q);
+    Vector3 hand_center = Vector3Add(wrist_joint, Vector3Scale(hand_axis_world, 0.5f));
+    Vector3 hand_end = Vector3Add(wrist_joint, hand_axis_world);
 
     bool upper_arm_stale = state->latest_frame.upper_arm_stale != 0;
     bool forearm_stale = state->latest_frame.forearm_stale != 0;
@@ -132,14 +165,21 @@ static void DrawArmSkeleton(const AppState *state) {
         16,
         (forearm_stale || hand_palm_stale) ? stale_bone_color : live_bone_color
     );
-    DrawCylinderEx(
-        wrist_joint,
-        hand_end,
-        0.02f,
-        0.016f,
-        12,
-        hand_palm_stale ? stale_bone_color : (Color){249, 180, 74, 220}
-    );
+    Matrix hand_rotation = QuaternionToMatrix(hand_palm_q);
+    rlPushMatrix();
+        rlTranslatef(hand_center.x, hand_center.y, hand_center.z);
+        rlMultMatrixf(MatrixToFloat(hand_rotation));
+        DrawCubeV(
+            (Vector3){0.0f, 0.0f, 0.0f},
+            (Vector3){HAND_BOARD_WIDTH, HAND_BOARD_LENGTH, HAND_BOARD_THICKNESS},
+            hand_color
+        );
+        DrawCubeWiresV(
+            (Vector3){0.0f, 0.0f, 0.0f},
+            (Vector3){HAND_BOARD_WIDTH, HAND_BOARD_LENGTH, HAND_BOARD_THICKNESS},
+            (Color){255, 245, 190, 255}
+        );
+    rlPopMatrix();
 
     DrawSphere(shoulder_joint, 0.045f, upper_arm_stale ? stale_joint_color : joint_color);
     DrawSphere(elbow_joint, 0.04f, forearm_stale ? stale_joint_color : joint_color);
@@ -151,8 +191,14 @@ static void DrawStatusText(const AppState *state) {
     int left = 20;
     int top = 16;
 
-    DrawText("Let your right arm hang naturally, then press C to calibrate", left, top, 24, (Color){245, 246, 248, 255});
-    DrawText(TextFormat("UDP %d | ESC to exit", UDP_PORT), left, top + 30, 18, (Color){176, 186, 204, 255});
+    DrawText("Real sensor mode: C calibrates. STM32 gun-test mode: use R to clear calibration.", left, top, 22, (Color){245, 246, 248, 255});
+    DrawText(
+        TextFormat("UDP %d | LMB orbit | Wheel zoom | V reset view | C calibrate | R reset calibration | ESC exit", UDP_PORT),
+        left,
+        top + 30,
+        18,
+        (Color){176, 186, 204, 255}
+    );
 
     if (!state->has_frame) {
         DrawText("Waiting for Python UDP data...", left, top + 58, 18, (Color){255, 196, 111, 255});
@@ -200,6 +246,77 @@ static int CollectRecentSamples(const AppState *state, PitchSample *out_samples,
     }
 
     return out_count;
+}
+
+static OrbitCameraState CreateOrbitCameraState(Vector3 position, Vector3 target) {
+    OrbitCameraState state = {0};
+    Vector3 offset = Vector3Subtract(position, target);
+    float distance = Vector3Length(offset);
+    if (distance < 0.001f) {
+        distance = 0.001f;
+        offset = (Vector3){0.0f, 0.0f, distance};
+    }
+
+    float pitch = asinf(Clamp(offset.y / distance, -1.0f, 1.0f));
+    float yaw = atan2f(offset.x, offset.z);
+
+    state.target = target;
+    state.distance = distance;
+    state.yaw = yaw;
+    state.pitch = pitch;
+    state.default_target = target;
+    state.default_distance = distance;
+    state.default_yaw = yaw;
+    state.default_pitch = pitch;
+    return state;
+}
+
+static void ResetOrbitCamera(OrbitCameraState *state) {
+    state->target = state->default_target;
+    state->distance = state->default_distance;
+    state->yaw = state->default_yaw;
+    state->pitch = state->default_pitch;
+}
+
+static void ApplyOrbitCamera(Camera3D *camera, const OrbitCameraState *state) {
+    float cos_pitch = cosf(state->pitch);
+    Vector3 offset = {
+        sinf(state->yaw) * cos_pitch * state->distance,
+        sinf(state->pitch) * state->distance,
+        cosf(state->yaw) * cos_pitch * state->distance,
+    };
+
+    camera->target = state->target;
+    camera->position = Vector3Add(state->target, offset);
+    camera->up = (Vector3){0.0f, 1.0f, 0.0f};
+}
+
+static void UpdateOrbitCamera(
+    OrbitCameraState *state,
+    Camera3D *camera,
+    bool mouse_over_viewport,
+    bool reset_requested
+) {
+    if (reset_requested) {
+        ResetOrbitCamera(state);
+    }
+
+    if (mouse_over_viewport && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        Vector2 mouse_delta = GetMouseDelta();
+        state->yaw -= mouse_delta.x * CAMERA_ORBIT_SENSITIVITY;
+        state->pitch += mouse_delta.y * CAMERA_ORBIT_SENSITIVITY;
+    }
+
+    if (mouse_over_viewport) {
+        float wheel_move = GetMouseWheelMove();
+        if (wheel_move != 0.0f) {
+            state->distance -= wheel_move * CAMERA_ZOOM_STEP;
+        }
+    }
+
+    state->pitch = Clamp(state->pitch, CAMERA_MIN_PITCH_DEG * DEG2RAD, CAMERA_MAX_PITCH_DEG * DEG2RAD);
+    state->distance = Clamp(state->distance, CAMERA_MIN_DISTANCE, CAMERA_MAX_DISTANCE);
+    ApplyOrbitCamera(camera, state);
 }
 
 static void DrawOscilloscope(const AppState *state, Rectangle bounds) {
@@ -292,6 +409,7 @@ int main(void) {
         return 1;
     }
 
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Upper Monitor Visualizer");
     SetTargetFPS(60);
 
@@ -301,6 +419,8 @@ int main(void) {
     camera.up = (Vector3){0.0f, 1.0f, 0.0f};
     camera.fovy = 42.0f;
     camera.projection = CAMERA_PERSPECTIVE;
+    OrbitCameraState orbit_camera = CreateOrbitCameraState(camera.position, camera.target);
+    ApplyOrbitCamera(&camera, &orbit_camera);
 
     while (!WindowShouldClose()) {
         PollUdpFrames(&state);
@@ -311,10 +431,20 @@ int main(void) {
             state.reference_hand_palm = UmonQuaternionFromWxyz(state.latest_frame.hand_palm);
             state.calibrated = true;
         }
+        if (IsKeyPressed(KEY_R)) {
+            state.calibrated = false;
+        }
 
         int screen_width = GetScreenWidth();
         int screen_height = GetScreenHeight();
         int top_height = (screen_height * 2) / 3;
+        Vector2 mouse_position = GetMousePosition();
+        bool mouse_over_3d_view = mouse_position.x >= 0.0f &&
+                                  mouse_position.x < (float)screen_width &&
+                                  mouse_position.y >= 0.0f &&
+                                  mouse_position.y < (float)top_height;
+        UpdateOrbitCamera(&orbit_camera, &camera, mouse_over_3d_view, IsKeyPressed(KEY_V));
+
         Rectangle oscilloscope_bounds = {
             0.0f,
             (float)top_height,

@@ -32,4 +32,4 @@ def shortest_angle_delta_deg(previous_deg: float, current_deg: float) -> float:
 
 
 def pitch_deg(quaternion: Quaternion) -> float:
-    return quaternion_to_euler_deg(quaternion)[1]
+    return quaternion_to_euler_deg(quaternion)[0]

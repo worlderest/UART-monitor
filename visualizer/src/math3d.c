@@ -35,7 +35,8 @@ Vector3 UmonRotateVector(Vector3 vector, Quaternion orientation) {
 }
 
 float UmonQuaternionPitchDeg(Quaternion orientation) {
-    float sinp = 2.0f * (orientation.w * orientation.y - orientation.z * orientation.x);
-    float pitch = asinf(ClampFloat(sinp, -1.0f, 1.0f));
+    float sinr_cosp = 2.0f * (orientation.w * orientation.x + orientation.y * orientation.z);
+    float cosr_cosp = 1.0f - 2.0f * (orientation.x * orientation.x + orientation.y * orientation.y);
+    float pitch = atan2f(sinr_cosp, cosr_cosp);
     return pitch * RAD2DEG;
 }
