@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from python_host.protocol import AlignedFrame, CSV_HEADER
+from python_host.protocol import AlignedFrame, CSV_HEADER, SCORES_CSV_HEADER, ShotScoreEvent
 
-StorageEventType = Literal["raw", "frame", "stop"]
+StorageEventType = Literal["raw", "frame", "score", "stop"]
 
 
 class BackgroundStorageWriter:
@@ -17,7 +17,8 @@ class BackgroundStorageWriter:
         self.out_dir = out_dir
         self.raw_path = self.out_dir / "raw.bin"
         self.csv_path = self.out_dir / "aligned.csv"
-        self._queue: queue.Queue[tuple[StorageEventType, bytes | AlignedFrame | None]] = queue.Queue()
+        self.scores_path = self.out_dir / "scores_log.csv"
+        self._queue: queue.Queue[tuple[StorageEventType, bytes | AlignedFrame | ShotScoreEvent | None]] = queue.Queue()
         self._thread = threading.Thread(target=self._worker, name="storage-writer", daemon=True)
         self._started = False
 
@@ -34,6 +35,9 @@ class BackgroundStorageWriter:
     def enqueue_frame(self, frame: AlignedFrame) -> None:
         self._queue.put(("frame", frame))
 
+    def enqueue_score(self, event: ShotScoreEvent) -> None:
+        self._queue.put(("score", event))
+
     def close(self) -> None:
         if not self._started:
             return
@@ -43,10 +47,17 @@ class BackgroundStorageWriter:
 
     def _worker(self) -> None:
         flush_deadline = time.monotonic() + 0.5
-        with self.raw_path.open("ab") as raw_file, self.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
+        with (
+            self.raw_path.open("ab") as raw_file,
+            self.csv_path.open("a", newline="", encoding="utf-8") as csv_file,
+            self.scores_path.open("a", newline="", encoding="utf-8") as scores_file,
+        ):
             csv_writer = csv.writer(csv_file)
+            scores_writer = csv.writer(scores_file)
             if csv_file.tell() == 0:
                 csv_writer.writerow(CSV_HEADER)
+            if scores_file.tell() == 0:
+                scores_writer.writerow(SCORES_CSV_HEADER)
 
             while True:
                 timeout = max(0.0, flush_deadline - time.monotonic())
@@ -55,12 +66,14 @@ class BackgroundStorageWriter:
                 except queue.Empty:
                     raw_file.flush()
                     csv_file.flush()
+                    scores_file.flush()
                     flush_deadline = time.monotonic() + 0.5
                     continue
 
                 if event_type == "stop":
                     raw_file.flush()
                     csv_file.flush()
+                    scores_file.flush()
                     break
 
                 if event_type == "raw":
@@ -69,8 +82,12 @@ class BackgroundStorageWriter:
                 elif event_type == "frame":
                     assert isinstance(payload, AlignedFrame)
                     csv_writer.writerow(payload.csv_row())
+                elif event_type == "score":
+                    assert isinstance(payload, ShotScoreEvent)
+                    scores_writer.writerow(payload.csv_row())
 
                 if time.monotonic() >= flush_deadline:
                     raw_file.flush()
                     csv_file.flush()
+                    scores_file.flush()
                     flush_deadline = time.monotonic() + 0.5

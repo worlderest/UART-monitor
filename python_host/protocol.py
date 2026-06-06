@@ -17,6 +17,11 @@ UDP_VERSION = 1
 UDP_FRAME_STRUCT = struct.Struct("<4sBBBBQ4f4f4fBBBBff")
 UDP_FRAME_SIZE = UDP_FRAME_STRUCT.size
 
+SCORE_MAGIC = b"USCR"
+SCORE_VERSION = 1
+SCORE_EVENT_STRUCT = struct.Struct("<4sB3xQffff")
+SCORE_EVENT_SIZE = SCORE_EVENT_STRUCT.size
+
 NODE_ID_TO_NAME = {
     0x01: "upper_arm",
     0x02: "forearm",
@@ -49,6 +54,14 @@ CSV_HEADER = [
     "hand_palm_stale",
     "hand_palm_pitch_deg",
     "hand_palm_pitch_dps",
+]
+
+SCORES_CSV_HEADER = [
+    "shot_timestamp_ms",
+    "total_score",
+    "stability_jitter_deg",
+    "max_muzzle_jump_deg",
+    "recovery_time_ms",
 ]
 
 
@@ -91,6 +104,24 @@ class AlignedFrame:
             int(self.hand_palm_stale),
             self.hand_palm_pitch_deg,
             self.hand_palm_pitch_dps,
+        ]
+
+
+@dataclass(slots=True)
+class ShotScoreEvent:
+    shot_timestamp_ms: int
+    total_score: float
+    stability_jitter_deg: float
+    max_muzzle_jump_deg: float
+    recovery_time_ms: float
+
+    def csv_row(self) -> list[object]:
+        return [
+            self.shot_timestamp_ms,
+            self.total_score,
+            self.stability_jitter_deg,
+            self.max_muzzle_jump_deg,
+            self.recovery_time_ms,
         ]
 
 
@@ -165,6 +196,39 @@ def pack_udp_frame(frame: AlignedFrame) -> bytes:
         0,
         frame.hand_palm_pitch_deg,
         frame.hand_palm_pitch_dps,
+    )
+
+
+def pack_score_event(event: ShotScoreEvent) -> bytes:
+    return SCORE_EVENT_STRUCT.pack(
+        SCORE_MAGIC,
+        SCORE_VERSION,
+        event.shot_timestamp_ms,
+        event.total_score,
+        event.stability_jitter_deg,
+        event.max_muzzle_jump_deg,
+        event.recovery_time_ms,
+    )
+
+
+def unpack_score_event(payload: bytes) -> ShotScoreEvent:
+    if len(payload) != SCORE_EVENT_SIZE:
+        raise ValueError(f"Expected {SCORE_EVENT_SIZE} bytes, got {len(payload)}")
+
+    magic, version, shot_timestamp_ms, total_score, stability_jitter_deg, max_muzzle_jump_deg, recovery_time_ms = (
+        SCORE_EVENT_STRUCT.unpack(payload)
+    )
+    if magic != SCORE_MAGIC:
+        raise ValueError(f"Invalid score magic: {magic!r}")
+    if version != SCORE_VERSION:
+        raise ValueError(f"Unsupported score version: {version}")
+
+    return ShotScoreEvent(
+        shot_timestamp_ms=shot_timestamp_ms,
+        total_score=total_score,
+        stability_jitter_deg=stability_jitter_deg,
+        max_muzzle_jump_deg=max_muzzle_jump_deg,
+        recovery_time_ms=recovery_time_ms,
     )
 
 

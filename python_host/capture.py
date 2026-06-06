@@ -11,7 +11,8 @@ from pathlib import Path
 import serial
 
 from python_host.alignment import PacketAligner
-from python_host.protocol import SERIAL_PACKET_SIZE, SerialPacketStreamParser, pack_udp_frame
+from python_host.protocol import SERIAL_PACKET_SIZE, SerialPacketStreamParser, pack_score_event, pack_udp_frame
+from python_host.scoring import DEFAULT_SCORING_CONFIG_PATH, ScorePipeline, load_scoring_config
 from python_host.storage import BackgroundStorageWriter
 
 
@@ -21,6 +22,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate")
     parser.add_argument("--udp-host", default="127.0.0.1", help="UDP target host")
     parser.add_argument("--udp-port", type=int, default=5005, help="UDP target port")
+    parser.add_argument("--score-udp-port", type=int, default=5006, help="UDP target port for score events")
+    parser.add_argument(
+        "--scoring-config",
+        type=Path,
+        default=DEFAULT_SCORING_CONFIG_PATH,
+        help="Scoring JSON config path",
+    )
     parser.add_argument(
         "--out-dir",
         type=Path,
@@ -41,6 +49,7 @@ class CaptureStats:
     invalid_chunks: int = 0
     aligned_frames: int = 0
     udp_frames: int = 0
+    score_events: int = 0
 
 
 class CaptureService:
@@ -50,11 +59,14 @@ class CaptureService:
         baud: int,
         udp_host: str,
         udp_port: int,
+        score_udp_port: int,
         out_dir: Path,
+        scoring_config_path: Path = DEFAULT_SCORING_CONFIG_PATH,
     ) -> None:
         self.port = port
         self.baud = baud
         self.udp_target = (udp_host, udp_port)
+        self.score_udp_target = (udp_host, score_udp_port)
         self.out_dir = out_dir
         self.stats = CaptureStats()
         self.error: str | None = None
@@ -63,6 +75,7 @@ class CaptureService:
         self._parser = SerialPacketStreamParser()
         self._aligner = PacketAligner(stale_timeout_ms=40)
         self._storage = BackgroundStorageWriter(out_dir=out_dir)
+        self._score_pipeline = ScorePipeline(load_scoring_config(scoring_config_path))
         self._udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._serial_thread = threading.Thread(target=self._serial_loop, name="serial-capture", daemon=True)
 
@@ -87,6 +100,7 @@ class CaptureService:
             with serial.Serial(self.port, self.baud, timeout=0.01) as serial_port:
                 logging.info("Writing captures into %s", self.out_dir.resolve())
                 logging.info("Forwarding aligned frames to udp://%s:%d", *self.udp_target)
+                logging.info("Forwarding score events to udp://%s:%d", *self.score_udp_target)
                 while not self.stop_event.is_set():
                     chunk = serial_port.read(serial_port.in_waiting or SERIAL_PACKET_SIZE)
                     if not chunk:
@@ -116,6 +130,10 @@ class CaptureService:
             self._storage.enqueue_frame(frame)
             self._udp_socket.sendto(pack_udp_frame(frame), self.udp_target)
             self.stats.udp_frames += 1
+            for score_event in self._score_pipeline.ingest(frame):
+                self._storage.enqueue_score(score_event)
+                self._udp_socket.sendto(pack_score_event(score_event), self.score_udp_target)
+                self.stats.score_events += 1
 
 
 def main() -> int:
@@ -133,7 +151,9 @@ def main() -> int:
         baud=args.baud,
         udp_host=args.udp_host,
         udp_port=args.udp_port,
+        score_udp_port=args.score_udp_port,
         out_dir=out_dir,
+        scoring_config_path=args.scoring_config,
     )
 
     service.start()
@@ -144,10 +164,11 @@ def main() -> int:
     finally:
         service.stop()
         logging.info(
-            "Stopped. serial_packets=%d aligned_frames=%d udp_frames=%d",
+            "Stopped. serial_packets=%d aligned_frames=%d udp_frames=%d score_events=%d",
             service.stats.serial_packets,
             service.stats.aligned_frames,
             service.stats.udp_frames,
+            service.stats.score_events,
         )
     return 1 if service.error else 0
 

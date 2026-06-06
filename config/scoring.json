@@ -1,0 +1,30 @@
+{
+  "stable_window_ms": 160,
+  "candidate_window_ms": 80,
+  "recoil_window_ms": 160,
+  "recovery_hold_ms": 120,
+  "recovery_timeout_ms": 800,
+  "refractory_ms": 300,
+  "hand_stable_speed_dps": 45.0,
+  "forearm_stable_speed_dps": 45.0,
+  "upper_arm_stable_speed_dps": 35.0,
+  "trigger_hand_pitch_dps": 220.0,
+  "raise_guard_forearm_dps": 100.0,
+  "raise_guard_upper_arm_dps": 80.0,
+  "recovery_band_deg": 2.5,
+  "weights": {
+    "stability": 0.4,
+    "muzzle_jump": 0.35,
+    "recovery": 0.25
+  },
+  "good_thresholds": {
+    "stability_jitter_deg": 0.8,
+    "max_muzzle_jump_deg": 6.0,
+    "recovery_time_ms": 180.0
+  },
+  "bad_thresholds": {
+    "stability_jitter_deg": 4.0,
+    "max_muzzle_jump_deg": 18.0,
+    "recovery_time_ms": 800.0
+  }
+}

@@ -3,6 +3,8 @@
   "baud": 460800,
   "udp_host": "127.0.0.1",
   "udp_port": 5005,
+  "score_udp_port": 5006,
   "visualizer": "build/upper_monitor_visualizer.exe",
-  "out_dir": ""
+  "out_dir": "",
+  "scoring_config": "config/scoring.json"
 }

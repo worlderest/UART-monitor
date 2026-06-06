@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,9 @@ DEFAULT_CONFIG_PATH = Path("config") / "launcher.json"
 DEFAULT_BAUD = 460800
 DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_UDP_PORT = 5005
+DEFAULT_SCORE_UDP_PORT = 5006
 DEFAULT_VISUALIZER = Path("build") / "upper_monitor_visualizer.exe"
+DEFAULT_SCORING_CONFIG = Path("config") / "scoring.json"
 BAUD_CHOICES = (115200, 230400, 460800, 921600)
 
 
@@ -28,8 +29,10 @@ class LauncherConfig:
     baud: int
     udp_host: str
     udp_port: int
+    score_udp_port: int
     visualizer: Path
     out_dir: Path | None
+    scoring_config: Path
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -40,7 +43,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--choose-baud", action="store_true", help="Choose baud rate from an interactive menu")
     parser.add_argument("--udp-host", default=None, help="UDP target host")
     parser.add_argument("--udp-port", type=int, default=None, help="UDP target port")
+    parser.add_argument("--score-udp-port", type=int, default=None, help="UDP target port for score events")
     parser.add_argument("--out-dir", type=Path, default=None, help="Capture output directory")
+    parser.add_argument("--scoring-config", type=Path, default=None, help="Scoring JSON config path")
     parser.add_argument("--visualizer", type=Path, default=None, help="Raylib visualizer executable path")
     parser.add_argument("--no-visualizer", action="store_true", help="Run capture only without opening Raylib")
     return parser
@@ -81,8 +86,14 @@ def merge_config(args: argparse.Namespace, config_data: dict[str, Any]) -> Launc
     baud = args.baud if args.baud is not None else _config_int(config_data, "baud", DEFAULT_BAUD)
     udp_host = args.udp_host if args.udp_host is not None else _config_str(config_data, "udp_host", DEFAULT_UDP_HOST)
     udp_port = args.udp_port if args.udp_port is not None else _config_int(config_data, "udp_port", DEFAULT_UDP_PORT)
+    score_udp_port = (
+        args.score_udp_port if args.score_udp_port is not None else _config_int(config_data, "score_udp_port", DEFAULT_SCORE_UDP_PORT)
+    )
 
     visualizer_value = args.visualizer if args.visualizer is not None else Path(_config_str(config_data, "visualizer", str(DEFAULT_VISUALIZER)))
+    scoring_config_value = (
+        args.scoring_config if args.scoring_config is not None else Path(_config_str(config_data, "scoring_config", str(DEFAULT_SCORING_CONFIG)))
+    )
     out_dir_value = args.out_dir
     if out_dir_value is None:
         config_out_dir = _config_str(config_data, "out_dir", "")
@@ -93,8 +104,10 @@ def merge_config(args: argparse.Namespace, config_data: dict[str, Any]) -> Launc
         baud=baud,
         udp_host=udp_host.strip(),
         udp_port=udp_port,
+        score_udp_port=score_udp_port,
         visualizer=visualizer_value,
         out_dir=out_dir_value,
+        scoring_config=scoring_config_value,
     )
 
 
@@ -154,7 +167,7 @@ def resolve_runtime_config(args: argparse.Namespace) -> LauncherConfig:
     return config
 
 
-def start_visualizer(visualizer_path: Path) -> subprocess.Popen[bytes]:
+def start_visualizer(visualizer_path: Path, udp_port: int, score_udp_port: int) -> subprocess.Popen[bytes]:
     if not visualizer_path.exists():
         raise FileNotFoundError(
             f"Visualizer executable not found: {visualizer_path}. "
@@ -162,7 +175,15 @@ def start_visualizer(visualizer_path: Path) -> subprocess.Popen[bytes]:
         )
 
     logging.info("Starting visualizer: %s", visualizer_path)
-    return subprocess.Popen([str(visualizer_path)])
+    return subprocess.Popen(
+        [
+            str(visualizer_path),
+            "--udp-port",
+            str(udp_port),
+            "--score-udp-port",
+            str(score_udp_port),
+        ]
+    )
 
 
 def stop_visualizer(process: subprocess.Popen[bytes] | None) -> None:
@@ -184,7 +205,9 @@ def run_capture(config: LauncherConfig) -> int:
         baud=config.baud,
         udp_host=config.udp_host,
         udp_port=config.udp_port,
+        score_udp_port=config.score_udp_port,
         out_dir=config.out_dir if config.out_dir is not None else default_output_dir(),
+        scoring_config_path=config.scoring_config,
     )
 
     logging.info("Starting capture on %s at %d baud", config.port, config.baud)
@@ -196,10 +219,11 @@ def run_capture(config: LauncherConfig) -> int:
     finally:
         service.stop()
         logging.info(
-            "Stopped. serial_packets=%d aligned_frames=%d udp_frames=%d",
+            "Stopped. serial_packets=%d aligned_frames=%d udp_frames=%d score_events=%d",
             service.stats.serial_packets,
             service.stats.aligned_frames,
             service.stats.udp_frames,
+            service.stats.score_events,
         )
     return 1 if service.error else 0
 
@@ -217,16 +241,18 @@ def main() -> int:
     try:
         config = resolve_runtime_config(args)
         logging.info(
-            "Launcher config: port=%s baud=%d udp=%s:%d out_dir=%s",
+            "Launcher config: port=%s baud=%d udp=%s:%d score_udp=%d out_dir=%s scoring_config=%s",
             config.port,
             config.baud,
             config.udp_host,
             config.udp_port,
+            config.score_udp_port,
             config.out_dir,
+            config.scoring_config,
         )
 
         if not args.no_visualizer:
-            visualizer_process = start_visualizer(config.visualizer)
+            visualizer_process = start_visualizer(config.visualizer, config.udp_port, config.score_udp_port)
             time.sleep(0.5)
 
         return run_capture(config)

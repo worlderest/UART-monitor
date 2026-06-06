@@ -24,6 +24,9 @@ add_executable(
     upper_monitor_visualizer
     src/main.c
     src/math3d.c
+    src/scene_assets.c
+    src/score_receiver.c
+    src/ui_theme.c
     src/udp_receiver.c
 )
 
@@ -50,4 +53,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${RAYLIB_DLL}"
             $<TARGET_FILE_DIR:upper_monitor_visualizer>
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/../resources"
+            "$<TARGET_FILE_DIR:upper_monitor_visualizer>/resources"
 )

@@ -2,8 +2,8 @@
 
 这个目录包含电脑端的两部分程序：
 
-- `python_host`：从 STM32 串口读取 `84` 字节姿态包，异步保存 `raw.bin` 和 `aligned.csv`，并把对齐后的 `250Hz` 子帧通过 UDP 转发给可视化程序。
-- `visualizer`：使用 `raylib` 接收 UDP 数据，渲染右臂三段骨架、手掌刚体板状模型，以及 `hand_palm Pitch` 实时示波器。
+- `python_host`：从 STM32 串口读取 `84` 字节姿态包，异步保存 `raw.bin`、`aligned.csv`、`scores_log.csv`，并把对齐后的 `250Hz` 子帧与评分事件通过 UDP 转发给可视化程序。
+- `visualizer`：使用 `raylib` 接收 UDP 数据，渲染右臂三段骨架、手掌刚体板状模型、`hand_palm Pitch` 实时示波器，以及单次开枪动作评分叠层。
 
 ## 快速开始
 
@@ -35,8 +35,10 @@ config/launcher.json
   "baud": 460800,
   "udp_host": "127.0.0.1",
   "udp_port": 5005,
+  "score_udp_port": 5006,
   "visualizer": "build/upper_monitor_visualizer.exe",
-  "out_dir": ""
+  "out_dir": "",
+  "scoring_config": "config/scoring.json"
 }
 ```
 
@@ -45,9 +47,11 @@ config/launcher.json
 - `port`：串口名，例如 `COM5`；留空时进入交互式选择。
 - `baud`：串口波特率，默认 `460800`。
 - `udp_host`：UDP 目标地址，默认 `127.0.0.1`。
-- `udp_port`：UDP 目标端口，默认 `5005`。
+- `udp_port`：姿态 UDP 目标端口，默认 `5005`。
+- `score_udp_port`：评分事件 UDP 目标端口，默认 `5006`。
 - `visualizer`：Raylib 可执行文件路径，默认 `build/upper_monitor_visualizer.exe`。
 - `out_dir`：采集输出目录；留空时自动使用 `captures/<启动时间戳>`。
+- `scoring_config`：评分参数 JSON 路径，默认 `config/scoring.json`。
 
 常用启动命令：
 
@@ -55,13 +59,14 @@ config/launcher.json
 python -m python_host.run_all --choose-baud
 python -m python_host.run_all --config config/launcher.json
 python -m python_host.run_all --no-visualizer --port COM5 --baud 460800
+python -m python_host.run_all --port COM5 --baud 460800 --udp-port 5005 --score-udp-port 5006
 ```
 
 如果你想单独调试某一部分，也可以分开启动：
 
 ```powershell
-python -m python_host.capture --port COM5 --baud 460800
-.\build\upper_monitor_visualizer.exe
+python -m python_host.capture --port COM5 --baud 460800 --score-udp-port 5006
+.\build\upper_monitor_visualizer.exe --udp-port 5005 --score-udp-port 5006
 ```
 
 ## 传感器佩戴语义
@@ -94,7 +99,9 @@ STM32 发给电脑的每个节点包固定为 `84` 字节小端结构：
 
 ## UDP 协议
 
-Python 发给 Raylib 的每个 UDP datagram 固定为 `76` 字节：
+### 姿态 UDP 协议
+
+Python 发给 Raylib 的每个姿态 UDP datagram 固定为 `76` 字节：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -114,6 +121,21 @@ Python 发给 Raylib 的每个 UDP datagram 固定为 `76` 字节：
 | `hand_palm_pitch_deg` | `float` | 手掌刚体绕 `X` 轴的 `Pitch` 角，单位为度 |
 | `hand_palm_pitch_dps` | `float` | 手掌刚体绕 `X` 轴的 `Pitch` 角速度，单位为度每秒 |
 
+### 评分 UDP 协议
+
+Python 发给 Raylib 的每个评分事件 UDP datagram 固定为 `32` 字节：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `magic` | `char[4]` | 固定为 `"USCR"` |
+| `version` | `uint8_t` | 当前版本固定为 `1` |
+| `reserved` | `uint8_t[3]` | 固定为 `0` |
+| `shot_timestamp_ms` | `uint64_t` | 本次判定为开枪触发峰值帧的 Unix epoch 毫秒时间戳 |
+| `total_score` | `float` | 总分，范围 `0..100` |
+| `stability_jitter_deg` | `float` | 稳枪抖动特征，单位度 |
+| `max_muzzle_jump_deg` | `float` | 最大上跳特征，单位度 |
+| `recovery_time_ms` | `float` | 归位耗时特征，单位毫秒 |
+
 ## Python 采集端
 
 ### 安装依赖
@@ -125,7 +147,7 @@ python -m pip install -r requirements.txt
 ### 独立运行
 
 ```powershell
-python -m python_host.capture --port COM5 --baud 460800
+python -m python_host.capture --port COM5 --baud 460800 --score-udp-port 5006
 ```
 
 `python_host.capture` 的命令行参数：
@@ -133,12 +155,14 @@ python -m python_host.capture --port COM5 --baud 460800
 - `--port`：必填，串口名，例如 `COM5`
 - `--baud`：可选，默认 `115200`
 - `--udp-host`：可选，默认 `127.0.0.1`
-- `--udp-port`：可选，默认 `5005`
+- `--udp-port`：可选，姿态 UDP 目标端口，默认 `5005`
+- `--score-udp-port`：可选，评分事件 UDP 目标端口，默认 `5006`
+- `--scoring-config`：可选，评分参数 JSON，默认 `config/scoring.json`
 - `--out-dir`：可选，默认 `captures/<启动时间戳>`
 
 说明：当前一键启动器默认波特率是 `460800`，这是为了匹配现阶段 STM32F103 测试固件；如果你单独运行 `python_host.capture`，建议显式写上 `--baud 460800`。
 
-### 对齐与落盘
+### 对齐、评分与落盘
 
 Python 端按 `seq_cnt` 对三节点数据做窗口对齐：
 
@@ -147,10 +171,19 @@ Python 端按 `seq_cnt` 对三节点数据做窗口对齐：
 - 某节点等待超过 `40ms` 仍未到达时，沿用该节点最近一次有效四元数，并把对应 `stale` 标记置为 `1`。
 - 每个子帧时间戳以窗口完成时刻为锚点，按 `4ms` 间隔逆推，保证三节点严格同轴。
 
+V1 开枪动作评分机制使用电脑端自动识别：
+
+- 动作阶段按 `稳枪 -> 击发 -> 回稳` 识别。
+- 只在击发前存在一段稳定持枪窗口时才允许触发，避免把单纯抬臂动作误判成开枪。
+- 当前输出 3 个子特征：`稳枪抖动`、`最大上跳`、`归位耗时`。
+- 总分由这 3 个子特征按可调权重合成为 `0..100`。
+- 评分参数不写死在代码里，统一放在 `config/scoring.json`，便于后续离线调参。
+
 采集输出文件：
 
 - `raw.bin`：所有合法 `84` 字节串口包的原始二进制顺序追加。
 - `aligned.csv`：对齐后的 `250Hz` 子帧表，每行对应一个子帧。
+- `scores_log.csv`：每次评分结算后追加一行，便于事后分析。
 
 `aligned.csv` 的列顺序固定为：
 
@@ -162,6 +195,14 @@ hand_palm_w,hand_palm_x,hand_palm_y,hand_palm_z,
 upper_arm_stale,forearm_stale,hand_palm_stale,
 hand_palm_pitch_deg,hand_palm_pitch_dps
 ```
+
+`scores_log.csv` 的列顺序固定为：
+
+```text
+shot_timestamp_ms,total_score,stability_jitter_deg,max_muzzle_jump_deg,recovery_time_ms
+```
+
+`scores_log.csv` 中的 `shot_timestamp_ms` 与 `aligned.csv` 使用同一时间轴，可直接按时间戳对齐做离线切片分析。
 
 ## Raylib 可视化端
 
@@ -189,8 +230,13 @@ cmake -S visualizer -B build -G "MinGW Makefiles" -DRAYLIB_ROOT=D:/your/path/ray
 如果不使用一键启动器，请先启动 Python 采集端，再运行：
 
 ```powershell
-.\build\upper_monitor_visualizer.exe
+.\build\upper_monitor_visualizer.exe --udp-port 5005 --score-udp-port 5006
 ```
+
+可执行参数：
+
+- `--udp-port`：姿态 UDP 接收端口，默认 `5005`
+- `--score-udp-port`：评分事件 UDP 接收端口，默认 `5006`
 
 ### 画面与交互
 
@@ -198,12 +244,14 @@ cmake -S visualizer -B build -G "MinGW Makefiles" -DRAYLIB_ROOT=D:/your/path/ray
 
 - 上方 `2/3`：右臂三段骨架的 `3D` 视图
 - 下方 `1/3`：`hand_palm Pitch` 最近 `2` 秒的实时滚动示波器
+- 波形图右上角：最近一次评分结算结果叠层
 
 渲染说明：
 
 - 大臂和小臂使用圆柱体骨段表示。
 - 手掌使用板状长方体表示，而不是圆柱体。
 - 某节点 `stale` 时，对应关节会变红，对应骨段也会变成偏灰红色。
+- 每次击发结算完成后，界面会显示 `Score XX.X` 与 3 个子特征值，并在数秒后淡出。
 
 交互说明：
 
@@ -227,6 +275,12 @@ Python 语法检查：
 python -m compileall python_host
 ```
 
+Python 单元测试：
+
+```powershell
+python -m unittest discover -s python_host/tests
+```
+
 Raylib 构建检查：
 
 ```powershell
@@ -235,7 +289,8 @@ cmake --build build
 
 ## 目录说明
 
-- `python_host/`：串口采集、协议解析、三节点对齐、CSV 落盘、UDP 转发、一键启动器
-- `visualizer/`：Raylib 可视化、UDP 接收、骨架渲染、示波器渲染
+- `python_host/`：串口采集、协议解析、三节点对齐、动作评分、CSV 落盘、UDP 转发、一键启动器
+- `visualizer/`：Raylib 可视化、姿态 UDP 接收、评分 UDP 接收、骨架渲染、示波器渲染、评分叠层
 - `config/launcher.json`：一键启动器默认配置
+- `config/scoring.json`：评分算法默认参数
 - `captures/`：采集输出目录
